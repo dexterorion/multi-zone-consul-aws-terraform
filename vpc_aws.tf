@@ -197,12 +197,65 @@ data "aws_ami" "amazonlinux" {
   }
 }
 
+//  This policy allows an instance to discover a consul cluster leader.
+resource "aws_iam_policy" "leader-discovery" {
+    name = "consul-node-leader-discovery"
+    path = "/"
+    policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "Stmt1468377974000",
+            "Effect": "Allow",
+            "Action": [
+                "autoscaling:DescribeAutoScalingInstances",
+                "autoscaling:DescribeAutoScalingGroups",
+                "ec2:DescribeInstances"
+            ],
+            "Resource": [
+                "*"
+            ]
+        }
+    ]
+}
+    EOF
+}
+
+//  Create a role which consul instances will assume.
+//  This role has a policy saying it can be assumed by ec2
+//  instances.
+resource "aws_iam_role" "consul-instance-role" {
+  name = "consul-instance-role"
+  assume_role_policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": "sts:AssumeRole",
+            "Principal": {
+                "Service": "ec2.amazonaws.com"
+            },
+            "Effect": "Allow",
+            "Sid": ""
+        }
+    ]
+}
+    EOF
+}
+
 //  Launch configuration for the consul cluster auto-scaling group.
 resource "aws_launch_configuration" "consul-cluster-lc" {
     name_prefix = "consul-node-"
     image_id = "${data.aws_ami.amazonlinux.image_id}"
     instance_type = "t2.micro"
-    security_groups = ["${aws_security_group.consul-cluster-vpc.id}"]
+    iam_instance_profile = "${aws_iam_instance_profile.consul-instance-profile.id}"
+    user_data = "${file("files/consul-node.sh")}"
+     security_groups = [
+      "${aws_security_group.consul-cluster-vpc.id}",
+      "${aws_security_group.consul-cluster-public-web.id}",
+      "${aws_security_group.consul-cluster-public-ssh.id}",
+    ]
     lifecycle {
         create_before_destroy = true
     }
@@ -217,8 +270,62 @@ resource "aws_autoscaling_group" "consul-cluster-asg" {
     vpc_zone_identifier = [
         "${aws_subnet.public-a.id}",
         "${aws_subnet.public-b.id}"
-   ]
+    ]
     lifecycle {
         create_before_destroy = true
     }
+    tag {
+      key                 = "Name"
+      value               = "Consul Node"
+      propagate_at_launch = true
+    }
+    tag {
+      key                 = "Project"
+      value               = "consul-cluster"
+      propagate_at_launch = true
+    }
+}
+
+resource "aws_elb" "consul-lb" {
+    name = "consul-lb-a"
+    security_groups = [
+        "${aws_security_group.consul-cluster-vpc.id}",
+        "${aws_security_group.consul-cluster-public-web.id}"
+    ]
+    subnets = [
+        "${aws_subnet.public-a.id}",
+        "${aws_subnet.public-b.id}"
+    ]
+    listener {
+        instance_port = 8500
+        instance_protocol = "http"
+        lb_port = 80
+        lb_protocol = "http"
+    }
+    health_check {
+        healthy_threshold = 2
+        unhealthy_threshold = 2
+        timeout = 3
+        target = "HTTP:8500/ui/"
+        interval = 30
+    }
+}
+
+
+
+//  Attach the policy to the role.
+resource "aws_iam_policy_attachment" "consul-instance-leader-discovery" {
+    name = "consul-instance-leader-discovery"
+    roles = ["${aws_iam_role.consul-instance-role.name}"]
+    policy_arn = "${aws_iam_policy.leader-discovery.arn}"
+}
+
+//  Create a instance profile for the role.
+resource "aws_iam_instance_profile" "consul-instance-profile" {
+    name = "consul-instance-profile"
+    roles = ["${aws_iam_role.consul-instance-role.name}"]
+}
+
+output "consul-dns" {
+    value = "${aws_elb.consul-lb.dns_name}"
 }

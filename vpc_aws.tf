@@ -5,6 +5,127 @@ provider "aws" {
   region      = "${var.region}"
 }
 
+data "aws_ami" "amazonlinux" {
+  most_recent = true
+
+  owners = ["137112412989"]
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "name"
+    values = ["amzn-ami-hvm-*"]
+  }
+}
+
+//  Create a role which consul instances will assume.
+//  This role has a policy saying it can be assumed by ec2
+//  instances.
+resource "aws_iam_role" "consul-instance-role" {
+  name = "consul-instance-role"
+  assume_role_policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": "sts:AssumeRole",
+            "Principal": {
+                "Service": "ec2.amazonaws.com"
+            },
+            "Effect": "Allow",
+            "Sid": ""
+        }
+    ]
+}
+EOF
+}
+
+//  The policy allows an instance to forward logs to CloudWatch, and
+//  create the Log Stream or Log Group if it doesn't exist.
+resource "aws_iam_policy" "forward-logs" {
+  name        = "consul-node-forward-logs"
+  path        = "/"
+  description = "Allows an instance to forward logs to CloudWatch"
+
+  policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+    ],
+      "Resource": [
+        "arn:aws:logs:*:*:*"
+    ]
+  }
+ ]
+}
+    EOF
+}
+
+//  This policy allows an instance to discover a consul cluster leader.
+resource "aws_iam_policy" "leader-discovery" {
+    name = "consul-node-leader-discovery"
+    path = "/"
+    policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "Stmt1468377974000",
+            "Effect": "Allow",
+            "Action": [
+                "autoscaling:DescribeAutoScalingInstances",
+                "autoscaling:DescribeAutoScalingGroups",
+                "ec2:DescribeInstances"
+            ],
+            "Resource": [
+                "*"
+            ]
+        }
+    ]
+}
+    EOF
+}
+
+//  Attach the policies to the role.
+resource "aws_iam_policy_attachment" "consul-instance-forward-logs" {
+  name       = "consul-instance-forward-logs"
+  roles      = ["${aws_iam_role.consul-instance-role.name}"]
+  policy_arn = "${aws_iam_policy.forward-logs.arn}"
+}
+
+//  Attach the policy to the role.
+resource "aws_iam_policy_attachment" "consul-instance-leader-discovery" {
+    name = "consul-instance-leader-discovery"
+    roles = ["${aws_iam_role.consul-instance-role.name}"]
+    policy_arn = "${aws_iam_policy.leader-discovery.arn}"
+}
+
+//  Create a instance profile for the role.
+resource "aws_iam_instance_profile" "consul-instance-profile" {
+    name = "consul-instance-profile"
+    role = "${aws_iam_role.consul-instance-role.name}"
+}
+
 //  Define the VPC.
 resource "aws_vpc" "consul-cluster" {
   cidr_block = "10.0.0.0/16" // i.e. 10.0.0.0 to 10.0.255.255
@@ -29,7 +150,7 @@ resource "aws_internet_gateway" "consul-cluster" {
 resource "aws_subnet" "public-a" {
   vpc_id                  = "${aws_vpc.consul-cluster.id}"
   cidr_block              = "10.0.1.0/24" // i.e. 10.0.1.0 to 10.0.1.255
-  availability_zone       = "ap-southeast-1a"
+  availability_zone       = "us-east-1a"
   map_public_ip_on_launch = true
   depends_on              = ["aws_internet_gateway.consul-cluster"]
   tags = {
@@ -40,7 +161,7 @@ resource "aws_subnet" "public-a" {
 resource "aws_subnet" "public-b" {
   vpc_id                  = "${aws_vpc.consul-cluster.id}"
   cidr_block              = "10.0.2.0/24" // i.e. 10.0.2.0 to 10.0.1.255
-  availability_zone       = "ap-southeast-1b"
+  availability_zone       = "us-east-1b"
   map_public_ip_on_launch = true
   depends_on              = ["aws_internet_gateway.consul-cluster"]
   tags = {
@@ -171,79 +292,6 @@ resource "aws_security_group" "consul-cluster-public-ssh" {
   }
 }
 
-data "aws_ami" "amazonlinux" {
-  most_recent = true
-
-  owners = ["137112412989"]
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
-
-  filter {
-    name   = "root-device-type"
-    values = ["ebs"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  filter {
-    name   = "name"
-    values = ["amzn-ami-hvm-*"]
-  }
-}
-
-//  This policy allows an instance to discover a consul cluster leader.
-resource "aws_iam_policy" "leader-discovery" {
-    name = "consul-node-leader-discovery"
-    path = "/"
-    policy = <<EOF
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "Stmt1468377974000",
-            "Effect": "Allow",
-            "Action": [
-                "autoscaling:DescribeAutoScalingInstances",
-                "autoscaling:DescribeAutoScalingGroups",
-                "ec2:DescribeInstances"
-            ],
-            "Resource": [
-                "*"
-            ]
-        }
-    ]
-}
-    EOF
-}
-
-//  Create a role which consul instances will assume.
-//  This role has a policy saying it can be assumed by ec2
-//  instances.
-resource "aws_iam_role" "consul-instance-role" {
-  name = "consul-instance-role"
-  assume_role_policy = <<EOF
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Action": "sts:AssumeRole",
-            "Principal": {
-                "Service": "ec2.amazonaws.com"
-            },
-            "Effect": "Allow",
-            "Sid": ""
-        }
-    ]
-}
-    EOF
-}
-
 //  Launch configuration for the consul cluster auto-scaling group.
 resource "aws_launch_configuration" "consul-cluster-lc" {
     name_prefix = "consul-node-"
@@ -263,20 +311,22 @@ resource "aws_launch_configuration" "consul-cluster-lc" {
 
 //  Auto-scaling group for our cluster.
 resource "aws_autoscaling_group" "consul-cluster-asg" {
+    depends_on           = ["aws_launch_configuration.consul-cluster-lc"]
     name = "consul-asg"
     launch_configuration = "${aws_launch_configuration.consul-cluster-lc.name}"
     min_size = 5
-    max_size = 5
+    max_size = 7
     vpc_zone_identifier = [
         "${aws_subnet.public-a.id}",
         "${aws_subnet.public-b.id}"
     ]
+    load_balancers       = ["${aws_elb.consul-lb.name}"]
     lifecycle {
         create_before_destroy = true
     }
     tag {
       key                 = "Name"
-      value               = "Consul Node"
+      value               = "consulnode"
       propagate_at_launch = true
     }
     tag {
@@ -299,7 +349,7 @@ resource "aws_elb" "consul-lb" {
     listener {
         instance_port = 8500
         instance_protocol = "http"
-        lb_port = 80
+        lb_port = 8500
         lb_protocol = "http"
     }
     health_check {
@@ -309,21 +359,6 @@ resource "aws_elb" "consul-lb" {
         target = "HTTP:8500/ui/"
         interval = 30
     }
-}
-
-
-
-//  Attach the policy to the role.
-resource "aws_iam_policy_attachment" "consul-instance-leader-discovery" {
-    name = "consul-instance-leader-discovery"
-    roles = ["${aws_iam_role.consul-instance-role.name}"]
-    policy_arn = "${aws_iam_policy.leader-discovery.arn}"
-}
-
-//  Create a instance profile for the role.
-resource "aws_iam_instance_profile" "consul-instance-profile" {
-    name = "consul-instance-profile"
-    roles = ["${aws_iam_role.consul-instance-role.name}"]
 }
 
 output "consul-dns" {
